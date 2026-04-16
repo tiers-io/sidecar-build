@@ -32,8 +32,27 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runner: macos-14
-          # Future: add x86_64-apple-darwin, linux targets
+            binary_name: conduwuit
+            artifact_name: continuwuity-aarch64-apple-darwin
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            binary_name: conduwuit
+            artifact_name: continuwuity-x86_64-apple-darwin
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_name: conduwuit
+            artifact_name: continuwuity-x86_64-unknown-linux-gnu
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            binary_name: conduwuit.exe
+            artifact_name: continuwuity-x86_64-pc-windows-msvc.exe
     steps:
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -48,6 +67,7 @@ jobs:
             cargo-git-${{ matrix.target }}-
 
       - name: Build continuwuity from source
+        shell: bash
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
           CARGO_NET_RETRY: "10"
@@ -72,21 +92,29 @@ jobs:
             sleep 30
           done
 
-          if [[ ! -f ./out/bin/conduwuit ]]; then
+          if [[ ! -f ./out/bin/${{ matrix.binary_name }} ]]; then
             echo "All attempts failed"
             exit 1
           fi
 
-          # Rename to continuwuity for our project
-          mv ./out/bin/conduwuit ./continuwuity-${{ matrix.target }}
-          file ./continuwuity-${{ matrix.target }}
-          shasum -a 256 ./continuwuity-${{ matrix.target }}
+          # Rename to our convention
+          mv ./out/bin/${{ matrix.binary_name }} ./${{ matrix.artifact_name }}
+          file ./${{ matrix.artifact_name }}
+
+      - name: Generate checksum
+        shell: bash
+        run: |
+          if command -v sha256sum &>/dev/null; then
+            sha256sum ./${{ matrix.artifact_name }}
+          else
+            shasum -a 256 ./${{ matrix.artifact_name }}
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: continuwuity-${{ matrix.target }}
-          path: ./continuwuity-${{ matrix.target }}
+          name: ${{ matrix.artifact_name }}
+          path: ./${{ matrix.artifact_name }}
 
   download-mautrix-slack:
     name: Download mautrix-slack (${{ matrix.asset }})
@@ -97,7 +125,8 @@ jobs:
         include:
           - asset: mautrix-slack-darwin-arm64
             target: aarch64-apple-darwin
-          # Future: add other platforms
+          - asset: mautrix-slack-amd64
+            target: x86_64-unknown-linux-gnu
     steps:
       - name: Download and verify
         run: |
@@ -129,9 +158,52 @@ jobs:
           name: mautrix-slack-${{ matrix.target }}
           path: ./mautrix-slack-${{ matrix.target }}
 
+  build-mautrix-slack:
+    name: Build mautrix-slack (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            goos: darwin
+            goarch: amd64
+            artifact_name: mautrix-slack-x86_64-apple-darwin
+          - target: x86_64-pc-windows-msvc
+            runner: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            artifact_name: mautrix-slack-x86_64-pc-windows-msvc.exe
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Clone mautrix-slack
+        run: |
+          git clone --depth 1 --branch "${{ env.MAUTRIX_SLACK_VERSION }}" \
+            https://github.com/mautrix/slack.git mautrix-slack-src
+
+      - name: Build mautrix-slack
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        working-directory: mautrix-slack-src
+        run: |
+          go build -trimpath -ldflags="-s -w" -o ../${{ matrix.artifact_name }} ./cmd/mautrix-slack
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ./${{ matrix.artifact_name }}
+
   release:
     name: Create release
-    needs: [build-continuwuity, download-mautrix-slack]
+    needs: [build-continuwuity, download-mautrix-slack, build-mautrix-slack]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -154,10 +226,10 @@ jobs:
           body: |
             Pre-built sidecar binaries for the Messaging desktop app.
 
-            | Binary | Version | Source |
-            |--------|---------|--------|
-            | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | Built from source on macOS arm64 |
-            | mautrix-slack | ${{ env.MAUTRIX_SLACK_VERSION }} | Pre-built from upstream release |
+            | Binary | Version | Platforms |
+            |--------|---------|-----------|
+            | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | macOS arm64, macOS Intel, Linux x86_64, Windows x86_64 |
+            | mautrix-slack | ${{ env.MAUTRIX_SLACK_VERSION }} | macOS arm64, macOS Intel, Linux x86_64, Windows x86_64 |
 
             ## Checksums
             See `sha256sums.txt` attached to this release.
