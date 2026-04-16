@@ -1,0 +1,165 @@
+name: Build Sidecars
+
+on:
+  workflow_dispatch:
+    inputs:
+      continuwuity_version:
+        description: 'Continuwuity version tag (e.g. v0.5.6)'
+        required: true
+        default: 'v0.5.6'
+      mautrix_slack_version:
+        description: 'mautrix-slack version tag (e.g. v0.2603.0)'
+        required: true
+        default: 'v0.2603.0'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CONTINUWUITY_VERSION: ${{ github.event.inputs.continuwuity_version || 'v0.5.6' }}
+  MAUTRIX_SLACK_VERSION: ${{ github.event.inputs.mautrix_slack_version || 'v0.2603.0' }}
+
+jobs:
+  build-continuwuity:
+    name: Build continuwuity (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          # Future: add x86_64-apple-darwin, linux targets
+    steps:
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo git db
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git/db
+            ~/.cargo/registry/cache
+          key: cargo-git-${{ matrix.target }}-${{ env.CONTINUWUITY_VERSION }}
+          restore-keys: |
+            cargo-git-${{ matrix.target }}-
+
+      - name: Build continuwuity from source
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+          CARGO_NET_RETRY: "10"
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "60"
+        run: |
+          set -euo pipefail
+
+          # Retry wrapper — forgejo.ellis.link drops connections on large clones
+          for attempt in 1 2 3 4 5; do
+            echo "=== Attempt $attempt of 5 ==="
+            if cargo install \
+              --git https://github.com/continuwuity/continuwuity \
+              --tag "$CONTINUWUITY_VERSION" \
+              --locked \
+              --root ./out \
+              conduwuit 2>&1; then
+              echo "Build succeeded on attempt $attempt"
+              break
+            fi
+            echo "Attempt $attempt failed, retrying in 30s..."
+            sleep 30
+          done
+
+          if [[ ! -f ./out/bin/conduwuit ]]; then
+            echo "All attempts failed"
+            exit 1
+          fi
+
+          # Rename to continuwuity for our project
+          mv ./out/bin/conduwuit ./continuwuity-${{ matrix.target }}
+          file ./continuwuity-${{ matrix.target }}
+          shasum -a 256 ./continuwuity-${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: continuwuity-${{ matrix.target }}
+          path: ./continuwuity-${{ matrix.target }}
+
+  download-mautrix-slack:
+    name: Download mautrix-slack (${{ matrix.asset }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: mautrix-slack-darwin-arm64
+            target: aarch64-apple-darwin
+          # Future: add other platforms
+    steps:
+      - name: Download and verify
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -o "${{ matrix.asset }}" \
+            "https://github.com/mautrix/slack/releases/download/${{ env.MAUTRIX_SLACK_VERSION }}/${{ matrix.asset }}"
+          curl -fsSL -o sha256sums.txt \
+            "https://github.com/mautrix/slack/releases/download/${{ env.MAUTRIX_SLACK_VERSION }}/sha256sums.txt"
+
+          expected=$(awk -v f="${{ matrix.asset }}" '$2 == f { print $1 }' sha256sums.txt)
+          actual=$(sha256sum "${{ matrix.asset }}" | awk '{ print $1 }')
+
+          if [[ "$expected" != "$actual" ]]; then
+            echo "SHA256 mismatch!"
+            echo "  expected: $expected"
+            echo "  actual:   $actual"
+            exit 1
+          fi
+          echo "SHA256 verified: $expected"
+
+          # Rename to match our convention
+          mv "${{ matrix.asset }}" "mautrix-slack-${{ matrix.target }}"
+          chmod +x "mautrix-slack-${{ matrix.target }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mautrix-slack-${{ matrix.target }}
+          path: ./mautrix-slack-${{ matrix.target }}
+
+  release:
+    name: Create release
+    needs: [build-continuwuity, download-mautrix-slack]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: sidecars-${{ env.CONTINUWUITY_VERSION }}-${{ env.MAUTRIX_SLACK_VERSION }}
+          name: "Sidecars: continuwuity ${{ env.CONTINUWUITY_VERSION }} + mautrix-slack ${{ env.MAUTRIX_SLACK_VERSION }}"
+          body: |
+            Pre-built sidecar binaries for the Messaging desktop app.
+
+            | Binary | Version | Source |
+            |--------|---------|--------|
+            | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | Built from source on macOS arm64 |
+            | mautrix-slack | ${{ env.MAUTRIX_SLACK_VERSION }} | Pre-built from upstream release |
+
+            ## Checksums
+            See `sha256sums.txt` attached to this release.
+          files: artifacts/*
+          fail_on_unmatched_files: true
