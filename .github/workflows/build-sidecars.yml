@@ -43,10 +43,8 @@ jobs:
             runner: ubuntu-latest
             binary_name: conduwuit
             artifact_name: continuwuity-x86_64-unknown-linux-gnu
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
-            binary_name: conduwuit.exe
-            artifact_name: continuwuity-x86_64-pc-windows-msvc.exe
+          # Note: Windows is not supported — continuwuity depends on jemalloc
+          # which requires a Unix-like build environment
     steps:
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -248,7 +246,7 @@ jobs:
 
             | Binary | Version | Platforms |
             |--------|---------|-----------|
-            | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | macOS arm64, macOS Intel, Linux x86_64, Windows x86_64 |
+            | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | macOS arm64, macOS Intel, Linux x86_64 |
             | mautrix-slack | ${{ env.MAUTRIX_SLACK_VERSION }} | macOS arm64, macOS Intel, Linux x86_64, Windows x86_64 |
 
             ## Checksums
