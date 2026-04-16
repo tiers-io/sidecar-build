@@ -202,12 +202,17 @@ jobs:
       - name: Build mautrix-slack
         shell: bash
         env:
-          CGO_ENABLED: '0'
+          CGO_ENABLED: '1'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         working-directory: mautrix-slack-src
         run: |
-          # Use goolm (pure Go) instead of libolm (CGO) to avoid C dependencies
+          # macOS ARM cross-compiling to x86_64: target the right arch for CGO
+          if [[ "$GOOS" == "darwin" && "$GOARCH" == "amd64" ]]; then
+            export GOFLAGS="-buildmode=default"
+            export CC="clang -arch x86_64"
+          fi
+          # Use goolm (pure Go) instead of libolm (CGO) — sqlite3 still needs CGO
           go build -tags goolm -trimpath -ldflags="-s -w" -o ../${{ matrix.artifact_name }} ./cmd/mautrix-slack
 
       - name: Upload artifact
