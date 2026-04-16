@@ -179,11 +179,13 @@ jobs:
             runner: macos-14
             goos: darwin
             goarch: amd64
+            cc: ''
             artifact_name: mautrix-slack-x86_64-apple-darwin
           - target: x86_64-pc-windows-msvc
-            runner: ubuntu-latest
+            runner: windows-latest
             goos: windows
             goarch: amd64
+            cc: ''
             artifact_name: mautrix-slack-x86_64-pc-windows-msvc.exe
     steps:
       - name: Install Go
@@ -197,12 +199,18 @@ jobs:
             https://github.com/mautrix/slack.git mautrix-slack-src
 
       - name: Build mautrix-slack
+        shell: bash
         env:
-          CGO_ENABLED: '0'
+          CGO_ENABLED: '1'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         working-directory: mautrix-slack-src
         run: |
+          # On macOS ARM building for x86_64, target the right arch
+          if [[ "$GOOS" == "darwin" && "$GOARCH" == "amd64" ]]; then
+            export CGO_CFLAGS="-target x86_64-apple-macos10.15"
+            export CGO_LDFLAGS="-target x86_64-apple-macos10.15"
+          fi
           go build -trimpath -ldflags="-s -w" -o ../${{ matrix.artifact_name }} ./cmd/mautrix-slack
 
       - name: Upload artifact
