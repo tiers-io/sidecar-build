@@ -8,9 +8,13 @@ on:
         required: true
         default: 'v0.5.6'
       mautrix_slack_version:
-        description: 'mautrix-slack version tag (e.g. v0.2603.0)'
+        description: 'mautrix-slack tag on the fork (e.g. v0.2604.0-tiers.1)'
         required: true
-        default: 'v0.2603.0'
+        default: 'v0.2604.0-tiers.1'
+      mautrix_slack_repo:
+        description: 'mautrix-slack git source (owner/name). Fork carries our extract_js fix.'
+        required: true
+        default: 'tiers-io/mautrix-slack'
   push:
     tags:
       - 'v*'
@@ -20,7 +24,8 @@ permissions:
 
 env:
   CONTINUWUITY_VERSION: ${{ github.event.inputs.continuwuity_version || 'v0.5.6' }}
-  MAUTRIX_SLACK_VERSION: ${{ github.event.inputs.mautrix_slack_version || 'v0.2603.0' }}
+  MAUTRIX_SLACK_VERSION: ${{ github.event.inputs.mautrix_slack_version || 'v0.2604.0-tiers.1' }}
+  MAUTRIX_SLACK_REPO: ${{ github.event.inputs.mautrix_slack_repo || 'tiers-io/mautrix-slack' }}
 
 jobs:
   build-continuwuity:
@@ -124,48 +129,6 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ./${{ matrix.artifact_name }}
 
-  download-mautrix-slack:
-    name: Download mautrix-slack (${{ matrix.asset }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - asset: mautrix-slack-darwin-arm64
-            target: aarch64-apple-darwin
-          - asset: mautrix-slack-amd64
-            target: x86_64-unknown-linux-gnu
-    steps:
-      - name: Download and verify
-        run: |
-          set -euo pipefail
-
-          curl -fsSL -o "${{ matrix.asset }}" \
-            "https://github.com/mautrix/slack/releases/download/${{ env.MAUTRIX_SLACK_VERSION }}/${{ matrix.asset }}"
-          curl -fsSL -o sha256sums.txt \
-            "https://github.com/mautrix/slack/releases/download/${{ env.MAUTRIX_SLACK_VERSION }}/sha256sums.txt"
-
-          expected=$(awk -v f="${{ matrix.asset }}" '$2 == f { print $1 }' sha256sums.txt)
-          actual=$(sha256sum "${{ matrix.asset }}" | awk '{ print $1 }')
-
-          if [[ "$expected" != "$actual" ]]; then
-            echo "SHA256 mismatch!"
-            echo "  expected: $expected"
-            echo "  actual:   $actual"
-            exit 1
-          fi
-          echo "SHA256 verified: $expected"
-
-          # Rename to match our convention
-          mv "${{ matrix.asset }}" "mautrix-slack-${{ matrix.target }}"
-          chmod +x "mautrix-slack-${{ matrix.target }}"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mautrix-slack-${{ matrix.target }}
-          path: ./mautrix-slack-${{ matrix.target }}
-
   build-mautrix-slack:
     name: Build mautrix-slack (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
@@ -173,17 +136,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            goos: darwin
+            goarch: arm64
+            artifact_name: mautrix-slack-aarch64-apple-darwin
           - target: x86_64-apple-darwin
             runner: macos-14
             goos: darwin
             goarch: amd64
-
             artifact_name: mautrix-slack-x86_64-apple-darwin
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            artifact_name: mautrix-slack-x86_64-unknown-linux-gnu
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             goos: windows
             goarch: amd64
-
             artifact_name: mautrix-slack-x86_64-pc-windows-msvc.exe
     steps:
       - name: Install Go
@@ -191,11 +162,11 @@ jobs:
         with:
           go-version: 'stable'
 
-      - name: Clone mautrix-slack
+      - name: Clone mautrix-slack (fork carries our extract_js fix)
         shell: bash
         run: |
           git clone --depth 1 --branch "${{ env.MAUTRIX_SLACK_VERSION }}" \
-            https://github.com/mautrix/slack.git mautrix-slack-src
+            "https://github.com/${{ env.MAUTRIX_SLACK_REPO }}.git" mautrix-slack-src
 
       - name: Build mautrix-slack
         shell: bash
@@ -221,7 +192,7 @@ jobs:
 
   release:
     name: Create release
-    needs: [build-continuwuity, download-mautrix-slack, build-mautrix-slack]
+    needs: [build-continuwuity, build-mautrix-slack]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -244,10 +215,15 @@ jobs:
           body: |
             Pre-built sidecar binaries for the Messaging desktop app.
 
-            | Binary | Version | Platforms |
-            |--------|---------|-----------|
-            | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | macOS arm64, macOS Intel, Linux x86_64 |
-            | mautrix-slack | ${{ env.MAUTRIX_SLACK_VERSION }} | macOS arm64, macOS Intel, Linux x86_64, Windows x86_64 |
+            | Binary | Version | Source | Platforms |
+            |--------|---------|--------|-----------|
+            | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | continuwuity/continuwuity | macOS arm64, macOS Intel, Linux x86_64 |
+            | mautrix-slack | ${{ env.MAUTRIX_SLACK_VERSION }} | ${{ env.MAUTRIX_SLACK_REPO }} | macOS arm64, macOS Intel, Linux x86_64, Windows x86_64 |
+
+            All mautrix-slack targets are built from source on each run. The
+            default source is the `tiers-io/mautrix-slack` fork, which carries
+            a patch to pick the Slack team matching the current webview URL
+            instead of `teams[0]` — see upstream bug in `ExtractSlackTokenJS`.
 
             ## Checksums
             See `sha256sums.txt` attached to this release.
