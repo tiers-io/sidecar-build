@@ -15,6 +15,10 @@ on:
         description: 'mautrix-slack git source (owner/name). Fork carries our extract_js fix.'
         required: true
         default: 'tiers-io/mautrix-slack'
+      ollama_version:
+        description: 'Ollama version tag (e.g. v0.21.2)'
+        required: true
+        default: 'v0.21.2'
   push:
     tags:
       - 'v*'
@@ -26,6 +30,7 @@ env:
   CONTINUWUITY_VERSION: ${{ github.event.inputs.continuwuity_version || 'v0.5.6' }}
   MAUTRIX_SLACK_VERSION: ${{ github.event.inputs.mautrix_slack_version || 'v0.2604.0-tiers.1' }}
   MAUTRIX_SLACK_REPO: ${{ github.event.inputs.mautrix_slack_repo || 'tiers-io/mautrix-slack' }}
+  OLLAMA_VERSION: ${{ github.event.inputs.ollama_version || 'v0.21.2' }}
 
 jobs:
   build-continuwuity:
@@ -190,9 +195,111 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ./${{ matrix.artifact_name }}
 
+  build-ollama:
+    name: Build ollama (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            goos: darwin
+            goarch: arm64
+            artifact_name: ollama-aarch64-apple-darwin
+          # macOS Intel, Linux x86_64, Windows x86_64 deferred for v1.
+          # On darwin/arm64 the Metal GGML backend is statically linked into
+          # the binary via Go build tags (ml/backend/ggml/ggml/src/ggml_darwin_arm64.go
+          # blank-imports ggml-metal with -DGGML_METAL_EMBED_LIBRARY). Other
+          # platforms ship the GGML backends as loose shared libs that
+          # ollama dlopens at runtime — bundling those requires a different
+          # approach and is out of scope for the v1 single-binary cut.
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Clone Ollama at pinned tag
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "${{ env.OLLAMA_VERSION }}" \
+            https://github.com/ollama/ollama.git ollama-src
+
+      - name: Build ollama
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # Match Ollama's official darwin release flags so the binary runs
+          # on macOS 14+ and matches their optimization level.
+          CGO_CFLAGS: '-O3 -mmacosx-version-min=14.0'
+          CGO_CXXFLAGS: '-O3 -mmacosx-version-min=14.0'
+          CGO_LDFLAGS: '-mmacosx-version-min=14.0'
+        working-directory: ollama-src
+        run: |
+          set -euo pipefail
+          GOFLAGS="-trimpath" go build \
+            -ldflags="-s -w -X=github.com/ollama/ollama/version.Version=${OLLAMA_VERSION#v} -X=github.com/ollama/ollama/server.mode=release" \
+            -o "../${{ matrix.artifact_name }}" .
+
+      - name: Inspect binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file "./${{ matrix.artifact_name }}"
+          if command -v otool >/dev/null 2>&1; then
+            echo "--- otool -L ---"
+            otool -L "./${{ matrix.artifact_name }}"
+          fi
+          ls -lh "./${{ matrix.artifact_name }}"
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "./${{ matrix.artifact_name }}"
+          else
+            sha256sum "./${{ matrix.artifact_name }}"
+          fi
+
+      - name: Smoke test (start, /api/tags, stop)
+        if: matrix.goos == 'darwin' && matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "./${{ matrix.artifact_name }}"
+          # Use isolated model store + non-default port so we don't collide
+          # with anything on the runner.
+          export OLLAMA_HOST=127.0.0.1:11436
+          export OLLAMA_MODELS="$RUNNER_TEMP/ollama-models"
+          mkdir -p "$OLLAMA_MODELS"
+          "./${{ matrix.artifact_name }}" serve > ollama-serve.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          # Poll for readiness up to ~10s
+          for i in $(seq 1 40); do
+            if curl -fsS "http://${OLLAMA_HOST}/api/tags" >/dev/null 2>&1; then
+              echo "Ready after ${i} polls (~$((i * 250))ms)"
+              break
+            fi
+            sleep 0.25
+          done
+          echo "--- /api/tags ---"
+          curl -fsS "http://${OLLAMA_HOST}/api/tags"
+          echo
+          echo "--- /api/version ---"
+          curl -fsS "http://${OLLAMA_HOST}/api/version" || true
+          echo
+          echo "--- server log tail ---"
+          tail -50 ollama-serve.log || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ./${{ matrix.artifact_name }}
+
   release:
     name: Create release
-    needs: [build-continuwuity, build-mautrix-slack]
+    needs: [build-continuwuity, build-mautrix-slack, build-ollama]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -210,8 +317,8 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: sidecars-${{ env.CONTINUWUITY_VERSION }}-${{ env.MAUTRIX_SLACK_VERSION }}
-          name: "Sidecars: continuwuity ${{ env.CONTINUWUITY_VERSION }} + mautrix-slack ${{ env.MAUTRIX_SLACK_VERSION }}"
+          tag_name: sidecars-${{ env.CONTINUWUITY_VERSION }}-${{ env.MAUTRIX_SLACK_VERSION }}-ollama-${{ env.OLLAMA_VERSION }}
+          name: "Sidecars: continuwuity ${{ env.CONTINUWUITY_VERSION }} + mautrix-slack ${{ env.MAUTRIX_SLACK_VERSION }} + ollama ${{ env.OLLAMA_VERSION }}"
           body: |
             Pre-built sidecar binaries for the Messaging desktop app.
 
@@ -219,11 +326,21 @@ jobs:
             |--------|---------|--------|-----------|
             | continuwuity | ${{ env.CONTINUWUITY_VERSION }} | continuwuity/continuwuity | macOS arm64, macOS Intel, Linux x86_64 |
             | mautrix-slack | ${{ env.MAUTRIX_SLACK_VERSION }} | ${{ env.MAUTRIX_SLACK_REPO }} | macOS arm64, macOS Intel, Linux x86_64, Windows x86_64 |
+            | ollama | ${{ env.OLLAMA_VERSION }} | ollama/ollama | macOS arm64 |
 
             All mautrix-slack targets are built from source on each run. The
             default source is the `tiers-io/mautrix-slack` fork, which carries
             a patch to pick the Slack team matching the current webview URL
             instead of `teams[0]` — see upstream bug in `ExtractSlackTokenJS`.
+
+            Ollama is built from upstream `ollama/ollama` at the pinned tag.
+            On macOS arm64 the Metal GGML backend is statically linked into
+            the binary via the `ggml_darwin_arm64.go` build tag (with
+            `-DGGML_METAL_EMBED_LIBRARY`), so a single signable binary ships
+            with embedded Metal compute kernels — no loose dylibs alongside.
+            Other platforms are not built for v1: their GGML backends ship as
+            shared libraries that ollama dlopens at runtime, which doesn't
+            match the single-binary sidecar shape and is deferred.
 
             ## Checksums
             See `sha256sums.txt` attached to this release.
